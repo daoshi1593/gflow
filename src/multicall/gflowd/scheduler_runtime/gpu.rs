@@ -83,6 +83,7 @@ mod admission_tests {
             max_utilization_percent: 50,
             max_memory_used_percent: 60,
             allow_external_sharing: false,
+            max_shared_jobs_per_gpu: None,
             legacy_lock_dir: None,
         };
         assert!(check_sample(49, 5999, 10000, limits).is_ok());
@@ -163,6 +164,8 @@ impl SchedulerRuntime {
     }
 
     pub fn set_gpu_admission(&mut self, limits: GpuAdmissionConfig) {
+        self.scheduler
+            .set_max_shared_jobs_per_gpu(limits.max_shared_jobs_per_gpu);
         self.gpu_admission = Some(limits);
     }
 

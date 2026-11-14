@@ -64,6 +64,8 @@ pub struct GpuAdmissionConfig {
     #[serde(default)]
     pub allow_external_sharing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_shared_jobs_per_gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_lock_dir: Option<std::path::PathBuf>,
 }
 

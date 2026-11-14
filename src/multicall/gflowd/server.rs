@@ -76,6 +76,9 @@ pub async fn run(config: gflow::config::Config) -> anyhow::Result<()> {
         {
             anyhow::bail!("daemon.gpu_admission thresholds must be between 1 and 100");
         }
+        if limits.max_shared_jobs_per_gpu.is_some_and(|limit| !(1..=2).contains(&limit)) {
+            anyhow::bail!("max_shared_jobs_per_gpu must be 1 or 2");
+        }
         if limits.allow_external_sharing
             && (!cfg!(target_os = "linux") || config.executor.r#type != ExecutorType::Process)
         {

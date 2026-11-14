@@ -175,7 +175,9 @@ Both measurements must be strictly below their limits. The daemon samples
 NVML before selecting devices and again before launching each job. Missing
 measurements keep GPU jobs queued. CPU-only jobs are unaffected. This policy
 uses device-wide measurements and applies at launch; it does not limit a
-running process. Shared mode admits at most two gflow jobs per device.
+running process. Shared mode admits at most two gflow jobs per device by
+default. Set `max_shared_jobs_per_gpu = 1` in this table to limit gflow
+to one job per GPU while retaining eligibility for external sharing.
 
 Set `allow_external_sharing = true` in this table to allow shared jobs to
 use devices with external CUDA processes. This option requires Linux and

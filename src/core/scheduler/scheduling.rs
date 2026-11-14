@@ -285,7 +285,8 @@ impl Scheduler {
                     .filter(|gpu| match gpu_sharing_mode {
                         GpuSharingMode::Shared => {
                             if exclusive_gpu_occupancy.contains(gpu)
-                                || shared_gpu_occupancy.get(gpu).copied().unwrap_or(0) >= 2
+                                || shared_gpu_occupancy.get(gpu).copied().unwrap_or(0)
+                                    >= self.max_shared_jobs_per_gpu.unwrap_or(2)
                             {
                                 false
                             } else if let Some(requested_gpu_memory_mb) = requested_gpu_memory_mb {
@@ -615,6 +616,10 @@ impl Scheduler {
     /// The boolean designates a slot unavailable to exclusive jobs.
     pub fn set_shared_gpu_budgets(&mut self, budgets: HashMap<u32, (u64, bool)>) {
         self.shared_gpu_budgets = budgets;
+    }
+
+    pub fn set_max_shared_jobs_per_gpu(&mut self, limit: Option<usize>) {
+        self.max_shared_jobs_per_gpu = limit;
     }
 
     /// Get the state path
