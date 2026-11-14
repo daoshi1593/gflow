@@ -44,6 +44,11 @@ pub trait Executor: Send + Sync {
         "unknown"
     }
 
+    /// Verified session ID of a durable job runner, where supported.
+    fn process_session(&self, _job_id: u32) -> Option<i32> {
+        None
+    }
+
     /// Terminate a running job (used by cancel / timeout / shutdown paths).
     ///
     /// `run_name` is the job's session/run name (only meaningful for tmux).

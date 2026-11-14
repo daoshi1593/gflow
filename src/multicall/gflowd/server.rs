@@ -76,6 +76,20 @@ pub async fn run(config: gflow::config::Config) -> anyhow::Result<()> {
         {
             anyhow::bail!("daemon.gpu_admission thresholds must be between 1 and 100");
         }
+        if limits.max_shared_jobs_per_gpu.is_some_and(|limit| !(1..=2).contains(&limit)) {
+            anyhow::bail!("max_shared_jobs_per_gpu must be 1 or 2");
+        }
+        if limits.allow_external_sharing
+            && (!cfg!(target_os = "linux") || config.executor.r#type != ExecutorType::Process)
+        {
+            anyhow::bail!("external GPU sharing requires the Linux process executor");
+        }
+        if let Some(dir) = &limits.legacy_lock_dir {
+            anyhow::ensure!(
+                dir.is_absolute() && dir.is_dir(),
+                "legacy_lock_dir must be an existing absolute directory"
+            );
+        }
         scheduler_runtime.set_gpu_admission(limits);
     }
     scheduler_runtime.set_state_saver(state_saver_handle.clone());

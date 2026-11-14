@@ -133,6 +133,10 @@ pub struct Scheduler {
     #[serde(skip)]
     pub(crate) gpu_slots: HashMap<GpuUuid, GPUSlot>,
     #[serde(skip)]
+    pub(crate) shared_gpu_budgets: HashMap<u32, (u64, bool)>,
+    #[serde(skip)]
+    pub(crate) max_shared_jobs_per_gpu: Option<usize>,
+    #[serde(skip)]
     pub(crate) total_memory_mb: u64,
     #[serde(skip)]
     pub(crate) available_memory_mb: u64,

@@ -1,10 +1,44 @@
 use super::*;
 use gflow::config::GpuAdmissionConfig;
+use nvml_wrapper::enums::device::UsedGpuMemory;
+use std::path::Path;
+
+const MIB: u64 = 1024 * 1024;
+
+struct SharedSample {
+    capacity_mb: u64,
+    external_process: bool,
+}
+
+fn legacy_lock_available(dir: Option<&Path>, index: u32, shared: bool) -> Result<(), String> {
+    let Some(dir) = dir else { return Ok(()) };
+    let path = dir.join(format!("gpu_{index}.lock"));
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open(&path).map_err(|error| {
+            format!(
+                "gpu_admission_lock_probe_failed: {}: {error}",
+                path.display()
+            )
+        })?;
+        let mode = if shared { libc::LOCK_SH } else { libc::LOCK_EX };
+        if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
+            return Err(format!("gpu_admission_legacy_lock: {}", path.display()));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    Err(format!(
+        "gpu_admission_lock_probe_unsupported: {}",
+        path.display()
+    ))
+}
 
 fn check_admission(
     nvml: Option<&Nvml>,
     index: u32,
-    limits: GpuAdmissionConfig,
+    limits: &GpuAdmissionConfig,
 ) -> Result<(), String> {
     let sample = || {
         let device = nvml
@@ -23,7 +57,7 @@ fn check_sample(
     utilization: u32,
     used: u64,
     total: u64,
-    limits: GpuAdmissionConfig,
+    limits: &GpuAdmissionConfig,
 ) -> Result<(), String> {
     if total == 0 {
         return Err("gpu_admission_sample_failed: zero total memory".into());
@@ -45,9 +79,12 @@ mod admission_tests {
 
     #[test]
     fn strict_boundaries_and_missing_nvml() {
-        let limits = GpuAdmissionConfig {
+        let limits = &GpuAdmissionConfig {
             max_utilization_percent: 50,
             max_memory_used_percent: 60,
+            allow_external_sharing: false,
+            max_shared_jobs_per_gpu: None,
+            legacy_lock_dir: None,
         };
         assert!(check_sample(49, 5999, 10000, limits).is_ok());
         assert!(check_sample(50, 5999, 10000, limits).is_err());
@@ -58,14 +95,106 @@ mod admission_tests {
 }
 
 impl SchedulerRuntime {
+    fn running_gpu_jobs(&self, index: u32) -> impl Iterator<Item = &gflow::core::job::JobRuntime> {
+        self.scheduler.job_runtimes().iter().filter(move |job| {
+            job.state == JobState::Running
+                && job.gpu_ids.as_ref().is_some_and(|ids| ids.contains(&index))
+        })
+    }
+
+    fn sample_external_sharing(
+        &self,
+        index: u32,
+        limits: &GpuAdmissionConfig,
+    ) -> Result<SharedSample, String> {
+        let sample = || {
+            let device = self
+                .nvml
+                .as_ref()
+                .context("NVML is unavailable")?
+                .device_by_index(index)?;
+            let sessions: HashMap<_, _> = self
+                .running_gpu_jobs(index)
+                .filter_map(|job| {
+                    Some((
+                        self.executor.process_session(job.id)?,
+                        job.gpu_memory_limit_mb.unwrap_or(0).saturating_mul(MIB),
+                    ))
+                })
+                .collect();
+            let mut managed = HashMap::new();
+            let mut seen = HashSet::new();
+            let mut external_process = false;
+            for process in device.running_compute_processes()? {
+                #[cfg(unix)]
+                let session = i32::try_from(process.pid)
+                    .ok()
+                    .map(|pid| unsafe { libc::getsid(pid) });
+                #[cfg(not(unix))]
+                let session: Option<i32> = None;
+                if let Some(sid) = session.filter(|sid| sessions.contains_key(sid)) {
+                    if seen.insert(process.pid) {
+                        if let UsedGpuMemory::Used(bytes) = process.used_gpu_memory {
+                            *managed.entry(sid).or_insert(0u64) += bytes;
+                        }
+                    }
+                } else {
+                    external_process = true;
+                }
+            }
+            let utilization = device.utilization_rates()?.gpu;
+            let memory = device.memory_info()?;
+            let credited = managed
+                .into_iter()
+                .map(|(sid, bytes)| bytes.min(sessions[&sid]))
+                .sum();
+            Ok::<_, anyhow::Error>((utilization, memory, credited, external_process))
+        };
+        let (utilization, memory, managed, external_process) =
+            sample().map_err(|error| format!("gpu_admission_sample_failed: {error}"))?;
+        check_sample(utilization, memory.used, memory.total, limits)?;
+        // Deduct all observable usage except memory attributable to this daemon's
+        // runners, up to their reservations. Unattributed memory and any
+        // usage above a reservation still reduce the available budget.
+        let capacity_mb = shared_capacity(memory.used, memory.total, managed)?;
+        Ok(SharedSample {
+            capacity_mb,
+            external_process,
+        })
+    }
+
     pub fn set_gpu_admission(&mut self, limits: GpuAdmissionConfig) {
+        self.scheduler
+            .set_max_shared_jobs_per_gpu(limits.max_shared_jobs_per_gpu);
         self.gpu_admission = Some(limits);
     }
 
     pub(super) fn check_job_gpu_admission(&self, job: &Job) -> Result<(), String> {
-        if let (Some(limits), Some(indices)) = (self.gpu_admission, &job.gpu_ids) {
+        if let (Some(limits), Some(indices)) = (&self.gpu_admission, &job.gpu_ids) {
             for &index in indices {
-                check_admission(self.nvml.as_ref(), index, limits)?;
+                let shared = job.gpu_sharing_mode == GpuSharingMode::Shared;
+                legacy_lock_available(limits.legacy_lock_dir.as_deref(), index, shared)?;
+                if !limits.allow_external_sharing {
+                    check_admission(self.nvml.as_ref(), index, limits)?;
+                    continue;
+                }
+                let sample = self.sample_external_sharing(index, limits)?;
+                if !shared && sample.external_process {
+                    return Err("gpu_admission_external_process".into());
+                }
+                if shared {
+                    let reserved: u64 = self
+                        .running_gpu_jobs(index)
+                        .filter(|job| job.gpu_sharing_mode == GpuSharingMode::Shared)
+                        .map(|job| job.gpu_memory_limit_mb.unwrap_or(0))
+                        .sum();
+                    if reserved > sample.capacity_mb {
+                        return Err(format!(
+                            "gpu_admission_shared_budget: {reserved} MiB reserved, {} MiB capacity",
+                            sample.capacity_mb
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -199,7 +328,53 @@ impl SchedulerRuntime {
             }
             self.ignored_gpu_processes = active_ignored;
         }
-        if let Some(limits) = self.gpu_admission {
+        if let Some(limits) = &self.gpu_admission {
+            let mut budgets = HashMap::new();
+            if limits.allow_external_sharing || limits.legacy_lock_dir.is_some() {
+                let indices: Vec<_> = self
+                    .scheduler
+                    .gpu_slots_mut()
+                    .values()
+                    .map(|slot| slot.index)
+                    .collect();
+                let sampled: HashMap<_, _> = indices
+                    .into_iter()
+                    .map(|index| {
+                        let result =
+                            legacy_lock_available(limits.legacy_lock_dir.as_deref(), index, true)
+                                .and_then(|_| {
+                                    if limits.allow_external_sharing {
+                                        self.sample_external_sharing(index, limits).map(Some)
+                                    } else {
+                                        check_admission(self.nvml.as_ref(), index, limits)
+                                            .map(|_| None)
+                                    }
+                                });
+                        (index, result)
+                    })
+                    .collect();
+                for slot in self.scheduler.gpu_slots_mut().values_mut() {
+                    match &sampled[&slot.index] {
+                        Ok(Some(sample)) => {
+                            slot.available = !running_exclusive_gpu_indices.contains(&slot.index);
+                            if slot.available && sample.external_process {
+                                slot.reason = Some("external_shared_only".into());
+                            } else if slot.available {
+                                slot.reason = None;
+                            }
+                            budgets
+                                .insert(slot.index, (sample.capacity_mb, sample.external_process));
+                        }
+                        Ok(None) => {}
+                        Err(reason) => {
+                            slot.available = false;
+                            slot.reason = Some(reason.clone());
+                        }
+                    }
+                }
+                self.scheduler.set_shared_gpu_budgets(budgets);
+                return;
+            }
             for slot in self.scheduler.gpu_slots_mut().values_mut() {
                 if let Err(reason) = check_admission(self.nvml.as_ref(), slot.index, limits) {
                     slot.available = false;
@@ -266,6 +441,13 @@ impl SchedulerRuntime {
         processes.sort_unstable();
         processes
     }
+}
+
+fn shared_capacity(used: u64, total: u64, managed: u64) -> Result<u64, String> {
+    let external = used
+        .checked_sub(managed)
+        .ok_or("gpu_admission_sample_failed: inconsistent memory samples")?;
+    Ok(total.saturating_sub(external) / MIB)
 }
 
 fn format_pid_list(pids: &[u32]) -> String {

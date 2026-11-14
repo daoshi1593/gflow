@@ -57,10 +57,16 @@ pub struct DaemonConfig {
     pub fair_share: FairShareConfig,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct GpuAdmissionConfig {
     pub max_utilization_percent: u32,
     pub max_memory_used_percent: u32,
+    #[serde(default)]
+    pub allow_external_sharing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_shared_jobs_per_gpu: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_lock_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

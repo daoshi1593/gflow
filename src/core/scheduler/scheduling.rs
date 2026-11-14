@@ -285,11 +285,17 @@ impl Scheduler {
                     .filter(|gpu| match gpu_sharing_mode {
                         GpuSharingMode::Shared => {
                             if exclusive_gpu_occupancy.contains(gpu)
-                                || shared_gpu_occupancy.get(gpu).copied().unwrap_or(0) >= 2
+                                || shared_gpu_occupancy.get(gpu).copied().unwrap_or(0)
+                                    >= self.max_shared_jobs_per_gpu.unwrap_or(2)
                             {
                                 false
                             } else if let Some(requested_gpu_memory_mb) = requested_gpu_memory_mb {
-                                if let Some(total_gpu_memory_mb) = gpu_total_memory_mb.get(gpu) {
+                                let capacity = self
+                                    .shared_gpu_budgets
+                                    .get(gpu)
+                                    .map(|(mb, _)| mb)
+                                    .or_else(|| gpu_total_memory_mb.get(gpu));
+                                if let Some(total_gpu_memory_mb) = capacity {
                                     let used_memory_mb =
                                         shared_gpu_memory_usage_mb.get(gpu).copied().unwrap_or(0);
                                     used_memory_mb.saturating_add(requested_gpu_memory_mb)
@@ -305,6 +311,10 @@ impl Scheduler {
                         GpuSharingMode::Exclusive => {
                             !exclusive_gpu_occupancy.contains(gpu)
                                 && shared_gpu_occupancy.get(gpu).copied().unwrap_or(0) == 0
+                                && !self
+                                    .shared_gpu_budgets
+                                    .get(gpu)
+                                    .is_some_and(|(_, only)| *only)
                         }
                     })
                     .collect();
@@ -600,6 +610,16 @@ impl Scheduler {
     /// Get a reference to gpu_slots for external access
     pub fn gpu_slots_mut(&mut self) -> &mut HashMap<GpuUuid, GPUSlot> {
         &mut self.gpu_slots
+    }
+
+    /// Replace live shared capacities after accounting for external GPU memory.
+    /// The boolean designates a slot unavailable to exclusive jobs.
+    pub fn set_shared_gpu_budgets(&mut self, budgets: HashMap<u32, (u64, bool)>) {
+        self.shared_gpu_budgets = budgets;
+    }
+
+    pub fn set_max_shared_jobs_per_gpu(&mut self, limit: Option<usize>) {
+        self.max_shared_jobs_per_gpu = limit;
     }
 
     /// Get the state path
