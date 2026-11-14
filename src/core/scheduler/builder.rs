@@ -89,6 +89,7 @@ impl SchedulerBuilder {
             job_runtimes: Vec::new(),
             executor: self.executor,
             gpu_slots: self.gpu_slots,
+            shared_gpu_budgets: HashMap::new(),
             total_memory_mb: self.total_memory_mb,
             available_memory_mb: self.total_memory_mb,
             state_path: self.state_path,

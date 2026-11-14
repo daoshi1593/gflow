@@ -175,6 +175,17 @@ Both measurements must be strictly below their limits. The daemon samples
 NVML before selecting devices and again before launching each job. Missing
 measurements keep GPU jobs queued. CPU-only jobs are unaffected. This policy
 uses device-wide measurements and applies at launch; it does not limit a
-running process. The existing rules for unmanaged processes still apply.
-Shared mode admits at most two jobs per device, subject to existing
-per-device memory requests.
+running process. Shared mode admits at most two gflow jobs per device.
+
+Set `allow_external_sharing = true` in this table to allow shared jobs to
+use devices with external CUDA processes. This option requires Linux and
+the process executor. Existing gflow reservations, the new request and
+external or unattributed memory must fit in physical VRAM. Failed NVML
+queries defer dispatch. Exclusive jobs still require a device without
+external CUDA processes.
+
+Hosts that use a legacy lock convention can set `legacy_lock_dir` to the
+absolute directory containing `gpu_<index>.lock` files. Both admission
+checks probe the same lock convention. Keep the corresponding shared or
+exclusive lock in each launch wrapper for the job's lifetime so that
+legacy launchers cannot race with a running job.

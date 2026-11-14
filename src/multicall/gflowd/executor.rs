@@ -373,6 +373,12 @@ impl Executor for ProcessExecutor {
         "process"
     }
 
+    fn process_session(&self, job_id: u32) -> Option<i32> {
+        let metadata = Self::metadata(job_id).ok()?;
+        (metadata.job_id == job_id && Self::process_identity_matches(&metadata))
+            .then_some(metadata.pgid)
+    }
+
     fn execute(&self, job: &Job) -> Result<()> {
         let result_path = gflow::paths::get_runner_result_path(job.id)?;
         let log_path = gflow::paths::prepare_log_file_path(job.id)?;
